@@ -1,0 +1,56 @@
+
+#include <GL/glut.h>
+
+// Inicijalizacija
+void init() {
+    glClearColor(0.5f, 0.8f, 1.0f, 1.0f); // Nebo - plava boja
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Crtanje ploče (terena)
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    // Kamera
+    gluLookAt(0.0, 5.0, 10.0,   // pozicija kamere
+              0.0, 0.0, 0.0,    // gledaj ka
+              0.0, 1.0, 0.0);   // gore je Y
+
+    // Teren (ploča)
+    glColor3f(0.3f, 0.8f, 0.3f); // zelena boja trave
+    glBegin(GL_QUADS);
+        glVertex3f(-10.0f, 0.0f, -10.0f);
+        glVertex3f( 10.0f, 0.0f, -10.0f);
+        glVertex3f( 10.0f, 0.0f,  10.0f);
+        glVertex3f(-10.0f, 0.0f,  10.0f);
+    glEnd();
+
+    glutSwapBuffers();
+}
+
+// Promena veličine prozora
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    float ratio = 1.0f * w / h;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45, ratio, 1, 1000);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+// Glavni program
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("OpenGL Teren - Ploca");
+
+    init();
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+
+    glutMainLoop();
+    return 0;
+}
