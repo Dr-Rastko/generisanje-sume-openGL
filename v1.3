@@ -1,0 +1,181 @@
+
+#include <GL/freeglut.h>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <map>
+#include <ctime>
+#include <cstdlib>
+
+float cameraAngleX = 30.0f;
+float cameraAngleY = 45.0f;
+float cameraDistance = 20.0f;
+
+int lastMouseX, lastMouseY;
+bool leftMousePressed = false;
+
+std::string axiom = "F";
+std::map<char, std::string> rules;
+std::string lsystemString;
+int lsystemDepth = 4;
+
+struct Vec3 {
+    float x, y, z;
+};
+
+std::vector<Vec3> treePositions;
+
+std::string generateLSystem(const std::string& axiom, int depth) {
+    std::string current = axiom;
+    for (int i = 0; i < depth; ++i) {
+        std::string next;
+        for (size_t j = 0; j < current.length(); ++j) {
+            char c = current[j];
+            if (rules.find(c) != rules.end())
+                next += rules[c];
+            else
+                next += c;
+        }
+        current = next;
+    }
+    return current;
+}
+
+void drawTree(const std::string& lsys) {
+    std::vector<GLfloat> matrixStack;
+    glPushMatrix();
+    for (size_t i = 0; i < lsys.length(); ++i) {
+        char c = lsys[i];
+        switch (c) {
+            case 'F':
+                glBegin(GL_LINES);
+                    glVertex3f(0.0f, 0.0f, 0.0f);
+                    glVertex3f(0.0f, 1.0f, 0.0f);
+                glEnd();
+                glTranslatef(0.0f, 1.0f, 0.0f);
+                break;
+            case '+':
+                glRotatef(25.0f, 0.0f, 0.0f, 1.0f);
+                break;
+            case '-':
+                glRotatef(-25.0f, 0.0f, 0.0f, 1.0f);
+                break;
+            case '[':
+                glPushMatrix();
+                break;
+            case ']':
+                glPopMatrix();
+                break;
+        }
+    }
+    glPopMatrix();
+}
+
+void init() {
+    glClearColor(0.5f, 0.8f, 1.0f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+
+    rules['F'] = "F[+F]F[-F]F";
+    lsystemString = generateLSystem(axiom, lsystemDepth);
+
+    srand((unsigned int)time(0));
+    for (int i = 0; i < 30; ++i) {
+        float x = (rand() % 200 - 100) / 10.0f;
+        float z = (rand() % 200 - 100) / 10.0f;
+        treePositions.push_back({x, 0.0f, z});
+    }
+}
+
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    float camX = cameraDistance * sinf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+    float camY = cameraDistance * sinf(cameraAngleX * 3.14f / 180.0f);
+    float camZ = cameraDistance * cosf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+
+    gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+    // Teren
+    glColor3f(0.3f, 0.8f, 0.3f);
+    glBegin(GL_QUADS);
+        glVertex3f(-10.0f, 0.0f, -10.0f);
+        glVertex3f( 10.0f, 0.0f, -10.0f);
+        glVertex3f( 10.0f, 0.0f,  10.0f);
+        glVertex3f(-10.0f, 0.0f,  10.0f);
+    glEnd();
+
+    // Drveće
+    glColor3f(0.4f, 0.25f, 0.1f);
+    for (size_t i = 0; i < treePositions.size(); ++i) {
+        glPushMatrix();
+        glTranslatef(treePositions[i].x, treePositions[i].y, treePositions[i].z);
+        drawTree(lsystemString);
+        glPopMatrix();
+    }
+
+    glutSwapBuffers();
+}
+
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    float ratio = (float)w / (float)h;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45, ratio, 1, 1000);
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+void motion(int x, int y) {
+    if (leftMousePressed) {
+        cameraAngleY += (x - lastMouseX);
+        cameraAngleX += (y - lastMouseY);
+        if (cameraAngleX > 89.0f) cameraAngleX = 89.0f;
+        if (cameraAngleX < -89.0f) cameraAngleX = -89.0f;
+    }
+
+    lastMouseX = x;
+    lastMouseY = y;
+
+    glutPostRedisplay();
+}
+
+void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        leftMousePressed = (state == GLUT_DOWN);
+        lastMouseX = x;
+        lastMouseY = y;
+    }
+}
+
+void mouseWheel(int button, int dir, int x, int y) {
+    if (dir > 0)
+        cameraDistance -= 1.0f;
+    else
+        cameraDistance += 1.0f;
+
+    if (cameraDistance < 2.0f) cameraDistance = 2.0f;
+    if (cameraDistance > 100.0f) cameraDistance = 100.0f;
+
+    glutPostRedisplay();
+}
+
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Projekat Petnica");
+
+    init();
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutMouseFunc(mouse);
+    glutMotionFunc(motion);
+    glutMouseWheelFunc(mouseWheel);
+
+    glutMainLoop();
+    return 0;
+}
