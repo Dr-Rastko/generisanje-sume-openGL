@@ -1,0 +1,328 @@
+
+#include <GL/freeglut.h>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <map>
+#include <ctime>
+#include <cstdlib>
+#include <GL/glu.h>
+
+float cameraAngleX = 30.0f;
+float cameraAngleY = 45.0f;
+float cameraDistance = 20.0f;
+
+int lastMouseX, lastMouseY;
+bool leftMousePressed = false;
+
+std::string axiom = "F";
+std::map<char, std::string> rules;
+std::string lsystemString;
+int lsystemDepth = 3;
+float branchAngle = 30.0f;
+
+// Dodati parametri za kontrolu veličine
+float segmentLengthMultiplier = 1.0f;  // Osnovna dužina segmenta
+float thicknessMultiplier = 1.0f;      // Osnovna debljina
+
+struct Vec3 {
+    float x, y, z;
+};
+
+std::vector<Vec3> treePositions;
+
+// Optimizacija: Cache za cilindar geometriju
+struct CylinderCache {
+    std::vector<float> vertices;
+    std::vector<float> normals;
+    bool isGenerated = false;
+} cylinderCache;
+
+std::string generateLSystem(const std::string& axiom, int depth) {
+    std::string current = axiom;
+    for (int i = 0; i < depth; ++i) {
+        std::string next;
+        next.reserve(current.length() * 7); // Rezervišemo memoriju za optimizaciju
+        for (size_t j = 0; j < current.length(); ++j) {
+            char c = current[j];
+            if (rules.find(c) != rules.end())
+                next += rules[c];
+            else
+                next += c;
+        }
+        current = next;
+    }
+    return current;
+}
+
+void regenerateLSystem() {
+    lsystemString = generateLSystem(axiom, lsystemDepth);
+}
+
+// Optimizovana verzija cilindra sa manje segmenata za bolje performanse
+void drawCylinderOptimized(float bottomRadius, float topRadius, float height) {
+    const int segments = 6; // Smanjeno sa 8 na 6 za bolje performanse
+    const float angleStep = 2.0f * 3.14159f / segments;
+
+    // Samo stranice - uklanjamo gornji i donji krug za performanse
+    glBegin(GL_TRIANGLE_STRIP);
+    for (int i = 0; i <= segments; i++) {
+        float angle = i * angleStep;
+        float x1 = bottomRadius * cos(angle);
+        float z1 = bottomRadius * sin(angle);
+        float x2 = topRadius * cos(angle);
+        float z2 = topRadius * sin(angle);
+
+        // Normala za osvetljenje
+        float nx = cos(angle);
+        float nz = sin(angle);
+
+        glNormal3f(nx, 0.0f, nz);
+        glVertex3f(x1, 0.0f, z1);
+        glVertex3f(x2, height, z2);
+    }
+    glEnd();
+}
+
+void drawTree(const std::string& lsys) {
+    glPushMatrix();
+    float segmentLength = 1.2f * segmentLengthMultiplier;
+    float thickness = 0.25f * thicknessMultiplier;
+    int depth = 0;
+
+    // Optimizacija: Prekalkulišemo konstante
+    const float thicknessReduction = 0.65f;
+    const float lengthReduction = 0.8f;
+    const float branchThicknessReduction = 0.8f;
+    const float branchLengthReduction = 0.9f;
+
+    for (size_t i = 0; i < lsys.length(); ++i) {
+        char c = lsys[i];
+        switch (c) {
+            case 'F':
+                // Optimizacija: Skip very small segments
+                if (thickness > 0.005f && segmentLength > 0.01f) {
+                    drawCylinderOptimized(thickness, thickness * 0.7f, segmentLength);
+                    glTranslatef(0.0f, segmentLength, 0.0f);
+                }
+
+                thickness *= thicknessReduction;
+                segmentLength *= lengthReduction;
+                break;
+            case '+': glRotatef(branchAngle, 0.0f, 0.0f, 1.0f); break;
+            case '-': glRotatef(-branchAngle, 0.0f, 0.0f, 1.0f); break;
+            case '&': glRotatef(branchAngle, 1.0f, 0.0f, 0.0f); break;
+            case '^': glRotatef(-branchAngle, 1.0f, 0.0f, 0.0f); break;
+            case '\\': glRotatef(branchAngle, 0.0f, 1.0f, 0.0f); break;
+            case '/': glRotatef(-branchAngle, 0.0f, 1.0f, 0.0f); break;
+            case '|': glRotatef(180.0f, 0.0f, 0.0f, 1.0f); break;
+            case '[':
+                glPushMatrix();
+                depth++;
+                thickness *= branchThicknessReduction;
+                segmentLength *= branchLengthReduction;
+                break;
+            case ']':
+                glPopMatrix();
+                depth--;
+                // Optimizacija: Prekalkulišemo vrednosti umesto uzastopnog množenja
+                thickness = 0.25f * thicknessMultiplier;
+                segmentLength = 1.2f * segmentLengthMultiplier;
+                float depthFactor = 1.0f;
+                for(int d = 0; d < depth; d++) {
+                    depthFactor *= 0.52f;
+                }
+                thickness *= depthFactor;
+                segmentLength *= pow(0.72f, depth);
+                break;
+        }
+    }
+    glPopMatrix();
+}
+
+void init() {
+    glClearColor(0.5f, 0.8f, 1.0f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
+
+    // Osvetljenje
+    GLfloat lightPos[] = {5.0f, 10.0f, 5.0f, 1.0f};
+    GLfloat lightDiffuse[] = {1.0f, 1.0f, 1.0f, 1.0f};
+    GLfloat lightAmbient[] = {0.4f, 0.4f, 0.4f, 1.0f};
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
+
+    // Optimizovano pravilo - manje grana za bolje performanse
+    rules['F'] = "F[+F][-F][&F][^F]"; // Uklonio \\F i /F za bolje performanse
+
+    regenerateLSystem();
+
+    srand((unsigned int)time(0));
+    // Smanjeno broj stabala za bolje performanse
+    for (int i = 0; i < 15; ++i) {
+        float x = (rand() % 200 - 100) / 10.0f;
+        float z = (rand() % 200 - 100) / 10.0f;
+        treePositions.push_back({x, 0.0f, z});
+    }
+}
+
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    float camX = cameraDistance * sinf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+    float camY = cameraDistance * sinf(cameraAngleX * 3.14f / 180.0f);
+    float camZ = cameraDistance * cosf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+
+    gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+    // Teren
+    glColor3f(0.3f, 0.8f, 0.3f);
+    glBegin(GL_QUADS);
+        glVertex3f(-15.0f, 0.0f, -15.0f);
+        glVertex3f( 15.0f, 0.0f, -15.0f);
+        glVertex3f( 15.0f, 0.0f,  15.0f);
+        glVertex3f(-15.0f, 0.0f,  15.0f);
+    glEnd();
+
+    // Drveće sa braon bojom
+    glColor3f(0.55f, 0.35f, 0.2f);
+
+    for (size_t i = 0; i < treePositions.size(); ++i) {
+        glPushMatrix();
+        glTranslatef(treePositions[i].x, treePositions[i].y, treePositions[i].z);
+        drawTree(lsystemString);
+        glPopMatrix();
+    }
+
+    glutSwapBuffers();
+}
+
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    float ratio = (float)w / (float)h;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45, ratio, 1, 1000);
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+void motion(int x, int y) {
+    if (leftMousePressed) {
+        cameraAngleY += (x - lastMouseX);
+        cameraAngleX += (y - lastMouseY);
+        if (cameraAngleX > 89.0f) cameraAngleX = 89.0f;
+        if (cameraAngleX < -89.0f) cameraAngleX = -89.0f;
+    }
+
+    lastMouseX = x;
+    lastMouseY = y;
+
+    glutPostRedisplay();
+}
+
+void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        leftMousePressed = (state == GLUT_DOWN);
+        lastMouseX = x;
+        lastMouseY = y;
+    }
+}
+
+// Prošireni UI meni
+void menu(int option) {
+    // Ugao grananja
+    if (option == 1) branchAngle = 15.0f;
+    else if (option == 2) branchAngle = 30.0f;
+    else if (option == 3) branchAngle = 45.0f;
+    else if (option == 4) branchAngle = 60.0f;
+
+    // Dubina
+    else if (option == 10) lsystemDepth = 2;
+    else if (option == 11) lsystemDepth = 3;
+    else if (option == 12) lsystemDepth = 4;
+    else if (option == 13) lsystemDepth = 5;
+
+    // Dužina segmenata
+    else if (option == 20) segmentLengthMultiplier = 0.5f;
+    else if (option == 21) segmentLengthMultiplier = 1.0f;
+    else if (option == 22) segmentLengthMultiplier = 1.5f;
+    else if (option == 23) segmentLengthMultiplier = 2.0f;
+    else if (option == 24) segmentLengthMultiplier = 3.0f;
+
+    // Debljina
+    else if (option == 30) thicknessMultiplier = 0.5f;
+    else if (option == 31) thicknessMultiplier = 1.0f;
+    else if (option == 32) thicknessMultiplier = 1.5f;
+    else if (option == 33) thicknessMultiplier = 2.0f;
+    else if (option == 34) thicknessMultiplier = 3.0f;
+
+    regenerateLSystem();
+    glutPostRedisplay();
+}
+
+void mouseWheel(int button, int dir, int x, int y) {
+    if (dir > 0)
+        cameraDistance -= 1.0f;
+    else
+        cameraDistance += 1.0f;
+
+    if (cameraDistance < 2.0f) cameraDistance = 2.0f;
+    if (cameraDistance > 100.0f) cameraDistance = 100.0f;
+
+    glutPostRedisplay();
+}
+
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Projekat Petnica");
+
+    init();
+
+    // Prošireni UI meni
+    glutCreateMenu(menu);
+    glutAddMenuEntry("=== Ugao grananja ===", -1);
+    glutAddMenuEntry("15 stepeni", 1);
+    glutAddMenuEntry("30 stepeni", 2);
+    glutAddMenuEntry("45 stepeni", 3);
+    glutAddMenuEntry("60 stepeni", 4);
+
+    glutAddMenuEntry("=== Dubina ===", -1);
+    glutAddMenuEntry("Dubina 2", 10);
+    glutAddMenuEntry("Dubina 3", 11);
+    glutAddMenuEntry("Dubina 4", 12);
+    glutAddMenuEntry("Dubina 5", 13);
+
+    glutAddMenuEntry("=== Duzina segmenata ===", -1);
+    glutAddMenuEntry("Kratko (0.5x)", 20);
+    glutAddMenuEntry("Normalno (1.0x)", 21);
+    glutAddMenuEntry("Dugo (1.5x)", 22);
+    glutAddMenuEntry("Vrlo dugo (2.0x)", 23);
+    glutAddMenuEntry("Ogromno (3.0x)", 24);
+
+    glutAddMenuEntry("=== Debljina ===", -1);
+    glutAddMenuEntry("Tanko (0.5x)", 30);
+    glutAddMenuEntry("Normalno (1.0x)", 31);
+    glutAddMenuEntry("Debelo (1.5x)", 32);
+    glutAddMenuEntry("Vrlo debelo (2.0x)", 33);
+    glutAddMenuEntry("Ogromno (3.0x)", 34);
+
+    glutAttachMenu(GLUT_RIGHT_BUTTON);
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutMouseFunc(mouse);
+    glutMotionFunc(motion);
+    glutMouseWheelFunc(mouseWheel);
+
+    glutMainLoop();
+    return 0;
+}
