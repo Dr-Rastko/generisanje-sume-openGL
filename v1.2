@@ -1,0 +1,110 @@
+
+#include <GL/freeglut.h>
+#include <cmath>
+
+float cameraAngleX = 30.0f;
+float cameraAngleY = 45.0f;
+float cameraDistance = 20.0f;
+
+int lastMouseX, lastMouseY;
+bool leftMousePressed = false;
+
+// Inicijalizacija
+void init() {
+    glClearColor(0.5f, 0.8f, 1.0f, 1.0f); // nebo
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Crtanje
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    // Izračunavanje pozicije kamere
+    float camX = cameraDistance * sinf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+    float camY = cameraDistance * sinf(cameraAngleX * 3.14f / 180.0f);
+    float camZ = cameraDistance * cosf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+
+    gluLookAt(camX, camY, camZ,  // pozicija kamere
+              0.0, 0.0, 0.0,     // gledaj ka centru
+              0.0, 1.0, 0.0);    // gore je Y
+
+    // Teren
+    glColor3f(0.3f, 0.8f, 0.3f);
+    glBegin(GL_QUADS);
+        glVertex3f(-10.0f, 0.0f, -10.0f);
+        glVertex3f( 10.0f, 0.0f, -10.0f);
+        glVertex3f( 10.0f, 0.0f,  10.0f);
+        glVertex3f(-10.0f, 0.0f,  10.0f);
+    glEnd();
+
+    glutSwapBuffers();
+}
+
+// Veličina prozora
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    float ratio = (float)w / (float)h;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45, ratio, 1, 1000);
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+// Pomeranje miša (rotacija kamere)
+void motion(int x, int y) {
+    if (leftMousePressed) {
+        cameraAngleY += (x - lastMouseX);
+        cameraAngleX += (y - lastMouseY);
+        if (cameraAngleX > 89.0f) cameraAngleX = 89.0f;
+        if (cameraAngleX < -89.0f) cameraAngleX = -89.0f;
+    }
+
+    lastMouseX = x;
+    lastMouseY = y;
+
+    glutPostRedisplay();
+}
+
+// Klik miša
+void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        leftMousePressed = (state == GLUT_DOWN);
+        lastMouseX = x;
+        lastMouseY = y;
+    }
+}
+
+// Zoom (scroll točkić)
+void mouseWheel(int button, int dir, int x, int y) {
+    if (dir > 0)
+        cameraDistance -= 1.0f;
+    else
+        cameraDistance += 1.0f;
+
+    if (cameraDistance < 2.0f) cameraDistance = 2.0f;
+    if (cameraDistance > 100.0f) cameraDistance = 100.0f;
+
+    glutPostRedisplay();
+}
+
+// Main
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Projekat Petnica");
+
+    init();
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutMouseFunc(mouse);
+    glutMotionFunc(motion);
+    glutMouseWheelFunc(mouseWheel); // Zahteva FreeGLUT
+
+    glutMainLoop();
+    return 0;
+}
