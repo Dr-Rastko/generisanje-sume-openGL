@@ -1,0 +1,705 @@
+
+
+#include <GL/freeglut.h>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <map>
+#include <ctime>
+#include <cstdlib>
+#include <GL/glu.h>
+#include <iostream>
+#include <fstream>
+
+float cameraAngleX = 30.0f;
+float cameraAngleY = 45.0f;
+float cameraDistance = 20.0f;
+
+int lastMouseX, lastMouseY;
+bool leftMousePressed = false;
+
+std::string axiom = "F";
+std::map<char, std::string> rules;
+std::string lsystemString;
+int lsystemDepth = 3;
+float branchAngle = 30.0f;
+
+// Dodati parametri za kontrolu velicine
+float segmentLengthMultiplier = 1.0f;
+float thicknessMultiplier = 1.0f;
+
+// Parametri za lisce
+bool showLeaves = true;
+float leafSize = 0.8f;
+float leafDensity = 0.7f;
+bool showStems = true;
+
+// Tekstura ID za lisce
+GLuint leafTextureID = 0;
+
+struct Vec3 {
+    float x, y, z;
+    Vec3(float x = 0, float y = 0, float z = 0) {
+        this->x = x;
+        this->y = y;
+        this->z = z;
+    }
+    Vec3 operator+(const Vec3& other) const { return Vec3(x + other.x, y + other.y, z + other.z); }
+    Vec3 operator*(float f) const { return Vec3(x * f, y * f, z * f); }
+    Vec3 operator-(const Vec3& other) const { return Vec3(x - other.x, y - other.y, z - other.z); }
+    float length() const { return sqrtf(x*x + y*y + z*z); }
+    Vec3 normalize() const {
+        float len = length();
+        if (len > 0.001f) return Vec3(x/len, y/len, z/len);
+        return Vec3(0, 1, 0);
+    }
+    Vec3 cross(const Vec3& other) const {
+        return Vec3(y * other.z - z * other.y,
+                    z * other.x - x * other.z,
+                    x * other.y - y * other.x);
+    }
+};
+
+struct Matrix4 {
+    float m[16];
+    Matrix4() {
+        for(int i = 0; i < 16; i++) m[i] = 0;
+        m[0] = m[5] = m[10] = m[15] = 1; // Identity
+    }
+
+    Matrix4(const Matrix4& other) {
+        for(int i = 0; i < 16; i++) m[i] = other.m[i];
+    }
+
+    Matrix4& operator=(const Matrix4& other) {
+        for(int i = 0; i < 16; i++) m[i] = other.m[i];
+        return *this;
+    }
+};
+
+struct LeafData {
+    Vec3 localPosition;
+    float size;
+    float rotation;
+    Vec3 color;
+    float stemLength;
+    Vec3 stemDirection;
+};
+
+// GLAVNE STRUKTURE PODATAKA
+std::vector<Vec3> treePositions;
+std::vector<std::vector<LeafData> > allTreeLeaves;
+
+// Funkcija za ucitavanje TGA teksture
+bool loadTGATexture(const char* filename, GLuint& textureID) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cout << "Ne mogu da otvorim fajl: " << filename << std::endl;
+        return false;
+    }
+
+    char header[18];
+    file.read(header, 18);
+
+    int width = header[12] + (header[13] << 8);
+    int height = header[14] + (header[15] << 8);
+    int bpp = header[16];
+
+    if (width <= 0 || height <= 0 || (bpp != 24 && bpp != 32)) {
+        std::cout << "Neispravna TGA tekstura" << std::endl;
+        return false;
+    }
+
+    int bytesPerPixel = bpp / 8;
+    int imageSize = width * height * bytesPerPixel;
+
+    char* imageData = new char[imageSize];
+    file.read(imageData, imageSize);
+    file.close();
+
+    unsigned char* processedData = new unsigned char[width * height * 4];
+
+    for (int i = 0; i < width * height; i++) {
+        int srcIndex = i * bytesPerPixel;
+        int dstIndex = i * 4;
+
+        processedData[dstIndex + 0] = imageData[srcIndex + 2]; // R
+        processedData[dstIndex + 1] = imageData[srcIndex + 1]; // G
+        processedData[dstIndex + 2] = imageData[srcIndex + 0]; // B
+
+        if (bytesPerPixel == 4) {
+            processedData[dstIndex + 3] = imageData[srcIndex + 3]; // A
+        } else {
+            unsigned char r = processedData[dstIndex + 0];
+            unsigned char g = processedData[dstIndex + 1];
+            unsigned char b = processedData[dstIndex + 2];
+            processedData[dstIndex + 3] = (r + g + b) / 3;
+        }
+    }
+
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, processedData);
+
+    delete[] imageData;
+    delete[] processedData;
+
+    std::cout << "Tekstura ucitana: " << filename << " (" << width << "x" << height << ")" << std::endl;
+    return true;
+}
+
+void createDefaultLeafTexture() {
+    const int texSize = 64;
+    unsigned char* textureData = new unsigned char[texSize * texSize * 4];
+
+    // FIKSIRAN SEED ZA KONZISTENTNO LISCE - ovo sprečava treperenje
+    srand(12345);
+
+    for (int y = 0; y < texSize; y++) {
+        for (int x = 0; x < texSize; x++) {
+            int index = (y * texSize + x) * 4;
+
+            float fx = (x / (float)(texSize - 1)) * 2.0f - 1.0f;
+            float fy = (y / (float)(texSize - 1)) * 2.0f - 1.0f;
+
+            float leafShape = 1.0f - (fx * fx + fy * fy * 1.5f);
+
+            float vein1 = 1.0f - fabs(fx) * 8.0f;
+            float vein2 = 1.0f - fabs(fx + fy * 0.3f) * 10.0f;
+            float vein3 = 1.0f - fabs(fx - fy * 0.3f) * 10.0f;
+
+            vein1 = vein1 > 0 ? vein1 : 0;
+            vein2 = vein2 > 0 ? vein2 : 0;
+            vein3 = vein3 > 0 ? vein3 : 0;
+
+            float veins = (vein1 + vein2 * 0.3f + vein3 * 0.3f);
+            veins = veins > 1.0f ? 1.0f : veins;
+
+            float finalShape = leafShape;
+            if (finalShape > 0) {
+                finalShape = finalShape * 0.8f + veins * 0.2f;
+            }
+
+            finalShape = finalShape > 1.0f ? 1.0f : finalShape;
+            finalShape = finalShape < 0.0f ? 0.0f : finalShape;
+
+            unsigned char alpha = (unsigned char)(finalShape * 255);
+
+            unsigned char r = (unsigned char)((0.2f + (rand() % 100) / 1000.0f) * 255);
+            unsigned char g = (unsigned char)((0.6f + (rand() % 100) / 500.0f) * 255);
+            unsigned char b = (unsigned char)((0.1f + (rand() % 100) / 1000.0f) * 255);
+
+            if (veins > 0.1f) {
+                r = (unsigned char)(r * 0.7f);
+                g = (unsigned char)(g * 0.7f);
+                b = (unsigned char)(b * 0.7f);
+            }
+
+            textureData[index + 0] = r;
+            textureData[index + 1] = g;
+            textureData[index + 2] = b;
+            textureData[index + 3] = alpha;
+        }
+    }
+
+    glGenTextures(1, &leafTextureID);
+    glBindTexture(GL_TEXTURE_2D, leafTextureID);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texSize, texSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, textureData);
+
+    delete[] textureData;
+
+    // Vraćamo seed na trenutno vreme
+    srand((unsigned int)time(0));
+}
+
+std::string generateLSystem(const std::string& axiom, int depth) {
+    std::string current = axiom;
+    for (int i = 0; i < depth; ++i) {
+        std::string next;
+        next.reserve(current.length() * 7);
+        for (size_t j = 0; j < current.length(); ++j) {
+            char c = current[j];
+            if (rules.find(c) != rules.end())
+                next += rules[c];
+            else
+                next += c;
+        }
+        current = next;
+    }
+    return current;
+}
+
+void drawStem(const LeafData& leafData) {
+    if (!showStems) return;
+
+    glPushMatrix();
+
+    Vec3 direction = leafData.stemDirection;
+    if (fabs(direction.y - 1.0f) > 0.001f && fabs(direction.y + 1.0f) > 0.001f) {
+        Vec3 up(0, 1, 0);
+        Vec3 axis = up.cross(direction).normalize();
+        float angle = acos(up.x * direction.x + up.y * direction.y + up.z * direction.z) * 180.0f / 3.14159f;
+        glRotatef(angle, axis.x, axis.y, axis.z);
+    } else if (direction.y < 0) {
+        glRotatef(180, 1, 0, 0);
+    }
+
+    glColor3f(0.4f, 0.6f, 0.3f);
+
+    const int segments = 4;
+    const float angleStep = 2.0f * 3.14159f / segments;
+    float thickness = thicknessMultiplier * 0.05f;
+
+    glBegin(GL_TRIANGLE_STRIP);
+    for (int i = 0; i <= segments; i++) {
+        float angle = i * angleStep;
+        float x = thickness * cos(angle);
+        float z = thickness * sin(angle);
+
+        glNormal3f(cos(angle), 0.0f, sin(angle));
+        glVertex3f(x, 0.0f, z);
+        glVertex3f(x * 0.8f, leafData.stemLength, z * 0.8f);
+    }
+    glEnd();
+
+    glPopMatrix();
+}
+
+void drawLeaf(const LeafData& leafData) {
+    glPushMatrix();
+
+    glTranslatef(leafData.localPosition.x, leafData.localPosition.y, leafData.localPosition.z);
+
+    if (showStems) {
+        drawStem(leafData);
+    }
+
+    glTranslatef(0, leafData.stemLength, 0);
+
+    glRotatef(leafData.rotation, 0.0f, 1.0f, 0.0f);
+    glRotatef(15.0f, 1.0f, 0.0f, 0.0f);
+
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GREATER, 0.1f);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, leafTextureID);
+
+    glColor4f(leafData.color.x, leafData.color.y, leafData.color.z, 1.0f);
+
+    float size = leafData.size;
+
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-size, -size * 0.7f, 0);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f(size, -size * 0.7f, 0);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f(size, size * 0.7f, 0);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-size, size * 0.7f, 0);
+    glEnd();
+
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_CULL_FACE);
+
+    glPopMatrix();
+}
+
+void drawCylinderOptimized(float bottomRadius, float topRadius, float height) {
+    const int segments = 6;
+    const float angleStep = 2.0f * 3.14159f / segments;
+
+    glBegin(GL_TRIANGLE_STRIP);
+    for (int i = 0; i <= segments; i++) {
+        float angle = i * angleStep;
+        float x1 = bottomRadius * cos(angle);
+        float z1 = bottomRadius * sin(angle);
+        float x2 = topRadius * cos(angle);
+        float z2 = topRadius * sin(angle);
+
+        float nx = cos(angle);
+        float nz = sin(angle);
+
+        glNormal3f(nx, 0.0f, nz);
+        glVertex3f(x1, 0.0f, z1);
+        glVertex3f(x2, height, z2);
+    }
+    glEnd();
+}
+
+struct BranchState {
+    float thickness;
+    float segmentLength;
+};
+
+std::vector<BranchState> branchStack;
+
+void drawTreeWithLeaves(const std::string& lsys, int treeIndex) {
+    glPushMatrix();
+
+    float segmentLength = 1.2f * segmentLengthMultiplier;
+    float thickness = 0.25f * thicknessMultiplier;
+
+    const float thicknessReduction = 0.65f;
+    const float lengthReduction = 0.8f;
+    const float branchThicknessReduction = 0.8f;
+    const float branchLengthReduction = 0.9f;
+
+    std::vector<LeafData>& currentTreeLeaves = allTreeLeaves[treeIndex];
+    size_t leafIndex = 0;
+
+    for (size_t i = 0; i < lsys.length(); ++i) {
+        char c = lsys[i];
+        switch (c) {
+        case 'F':
+            if (thickness > 0.005f && segmentLength > 0.01f) {
+                glColor3f(0.55f, 0.35f, 0.2f);
+                drawCylinderOptimized(thickness, thickness * 0.7f, segmentLength);
+
+                if (showLeaves && leafIndex < currentTreeLeaves.size()) {
+                    // UKLONJEN RANDOM DETEKTOR - sada uvek prikazuje lisce ako ga ima
+                    drawLeaf(currentTreeLeaves[leafIndex]);
+                    leafIndex++;
+                }
+
+                glTranslatef(0.0f, segmentLength, 0.0f);
+            }
+
+            thickness *= thicknessReduction;
+            segmentLength *= lengthReduction;
+            break;
+        case '+': glRotatef(branchAngle, 0.0f, 0.0f, 1.0f); break;
+        case '-': glRotatef(-branchAngle, 0.0f, 0.0f, 1.0f); break;
+        case '&': glRotatef(branchAngle, 1.0f, 0.0f, 0.0f); break;
+        case '^': glRotatef(-branchAngle, 1.0f, 0.0f, 0.0f); break;
+        case '\\': glRotatef(branchAngle, 0.0f, 1.0f, 0.0f); break;
+        case '/': glRotatef(-branchAngle, 0.0f, 1.0f, 0.0f); break;
+        case '|': glRotatef(180.0f, 0.0f, 0.0f, 1.0f); break;
+        case '[': { // Dodat je blok
+            glPushMatrix();
+            BranchState state;
+            state.thickness = thickness;
+            state.segmentLength = segmentLength;
+            branchStack.push_back(state);
+
+            thickness *= branchThicknessReduction;
+            segmentLength *= branchLengthReduction;
+            break;
+        }
+        case ']':
+            glPopMatrix();
+            if (!branchStack.empty()) {
+                BranchState state = branchStack.back();
+                branchStack.pop_back();
+                thickness = state.thickness;
+                segmentLength = state.segmentLength;
+            } else {
+                thickness = 0.25f * thicknessMultiplier;
+                segmentLength = 1.2f * segmentLengthMultiplier;
+            }
+            break;
+        }
+    }
+    glPopMatrix();
+}
+
+void generateLeavesForLSystem() {
+    allTreeLeaves.clear();
+    allTreeLeaves.resize(treePositions.size());
+
+    for (size_t i = 0; i < treePositions.size(); ++i) {
+        std::vector<LeafData>& currentTreeLeaves = allTreeLeaves[i];
+
+        // FIKSIRAN SEED ZA SVAKO STABLO - ovo sprečava treperenje lišća
+        srand(12345 + (unsigned int)i * 100);
+
+        float segmentLength = 1.2f * segmentLengthMultiplier;
+        float thickness = 0.25f * thicknessMultiplier;
+
+        const float thicknessReduction = 0.65f;
+        const float lengthReduction = 0.8f;
+        const float branchThicknessReduction = 0.8f;
+        const float branchLengthReduction = 0.9f;
+
+        for (size_t j = 0; j < lsystemString.length(); ++j) {
+            char c = lsystemString[j];
+            switch (c) {
+                case 'F':
+                    if (thickness < 0.12f && (rand() / (float)RAND_MAX) < leafDensity) {
+                        LeafData leaf;
+
+                        float radius = (rand() / (float)RAND_MAX) * thickness * 0.3f + thickness * 0.1f;
+                        float angle = (rand() / (float)RAND_MAX) * 2.0f * 3.14159f;
+                        leaf.localPosition = Vec3(radius * cos(angle), segmentLength, radius * sin(angle));
+
+                        leaf.size = leafSize * (0.8f + (rand() / (float)RAND_MAX) * 0.4f);
+                        leaf.rotation = (rand() / (float)RAND_MAX) * 360.0f;
+
+                        leaf.stemLength = 0.1f + (rand() / (float)RAND_MAX) * 0.15f;
+                        leaf.stemDirection = Vec3(
+                            (rand() / (float)RAND_MAX - 0.5f) * 0.5f,
+                            0.2f + (rand() / (float)RAND_MAX) * 0.3f,
+                            (rand() / (float)RAND_MAX - 0.5f) * 0.5f
+                        ).normalize();
+
+                        float greenBase = 0.6f + (rand() / (float)RAND_MAX) * 0.3f;
+                        leaf.color = Vec3(0.3f + (rand() / (float)RAND_MAX) * 0.4f, greenBase, 0.2f + (rand() / (float)RAND_MAX) * 0.3f);
+
+                        currentTreeLeaves.push_back(leaf);
+                    }
+
+                    thickness *= thicknessReduction;
+                    segmentLength *= lengthReduction;
+                    break;
+                case '[':
+                    branchStack.push_back(BranchState{thickness, segmentLength});
+                    thickness *= branchThicknessReduction;
+                    segmentLength *= branchLengthReduction;
+                    break;
+                case ']':
+                    if (!branchStack.empty()) {
+                        BranchState state = branchStack.back();
+                        branchStack.pop_back();
+                        thickness = state.thickness;
+                        segmentLength = state.segmentLength;
+                    }
+                    break;
+            }
+        }
+
+    }
+    // Vraćamo seed na trenutno vreme
+    srand((unsigned int)time(0));
+    std::cout << "Regenerisano lisce za sva stabla." << std::endl;
+}
+
+void regenerateLSystem() {
+    lsystemString = generateLSystem(axiom, lsystemDepth);
+    generateLeavesForLSystem();
+    std::cout << "L-System i lisce regenerisano." << std::endl;
+}
+
+void init() {
+    // PROMENJENA POZADINA NA JEDNU BOJU - bledo zelenu
+    glClearColor(0.7f, 0.9f, 0.7f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    GLfloat lightPos[] = {5.0f, 10.0f, 5.0f, 1.0f};
+    GLfloat lightDiffuse[] = {1.0f, 1.0f, 1.0f, 1.0f};
+    GLfloat lightAmbient[] = {0.4f, 0.4f, 0.4f, 1.0f};
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
+
+    rules['F'] = "F[+F][-F][&F][^F]";
+
+    if (!loadTGATexture("leaf.tga", leafTextureID)) {
+        std::cout << "Koristi defaultnu teksturu lisca..." << std::endl;
+        createDefaultLeafTexture();
+    }
+
+    srand((unsigned int)time(0));
+    for (int i = 0; i < 15; ++i) {
+        float x = (rand() % 200 - 100) / 10.0f;
+        float z = (rand() % 200 - 100) / 10.0f;
+        treePositions.push_back(Vec3(x, 0.0f, z));
+    }
+
+    regenerateLSystem();
+}
+
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    float camX = cameraDistance * sinf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+    float camY = cameraDistance * sinf(cameraAngleX * 3.14f / 180.0f);
+    float camZ = cameraDistance * cosf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+
+    gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+    // PROMENJENA PODLOGA - sada je jednobojna umesto sa pločicama
+    glColor3f(0.3f, 0.7f, 0.3f);  // Jednostavna zelena boja
+    glNormal3f(0.0f, 1.0f, 0.0f);
+    glBegin(GL_QUADS);
+        glVertex3f(-15.0f, 0.0f, -15.0f);
+        glVertex3f( 15.0f, 0.0f, -15.0f);
+        glVertex3f( 15.0f, 0.0f,  15.0f);
+        glVertex3f(-15.0f, 0.0f,  15.0f);
+    glEnd();
+
+    for (size_t i = 0; i < treePositions.size(); ++i) {
+        glPushMatrix();
+        glTranslatef(treePositions[i].x, treePositions[i].y, treePositions[i].z);
+
+        drawTreeWithLeaves(lsystemString, (int)i);
+
+        glPopMatrix();
+    }
+
+    glutSwapBuffers();
+}
+
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    float ratio = (float)w / (float)h;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45, ratio, 1, 1000);
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+void motion(int x, int y) {
+    if (leftMousePressed) {
+        cameraAngleY += (x - lastMouseX);
+        cameraAngleX += (y - lastMouseY);
+        if (cameraAngleX > 89.0f) cameraAngleX = 89.0f;
+        if (cameraAngleX < -89.0f) cameraAngleX = -89.0f;
+    }
+
+    lastMouseX = x;
+    lastMouseY = y;
+
+    glutPostRedisplay();
+}
+
+void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        leftMousePressed = (state == GLUT_DOWN);
+        lastMouseX = x;
+        lastMouseY = y;
+    }
+}
+
+void menu(int option) {
+    if (option == 1) branchAngle = 15.0f;
+    else if (option == 2) branchAngle = 30.0f;
+    else if (option == 3) branchAngle = 45.0f;
+    else if (option == 4) branchAngle = 60.0f;
+    else if (option == 10) lsystemDepth = 2;
+    else if (option == 11) lsystemDepth = 3;
+    else if (option == 12) lsystemDepth = 4;
+    else if (option == 13) lsystemDepth = 5;
+    else if (option == 20) segmentLengthMultiplier = 0.5f;
+    else if (option == 21) segmentLengthMultiplier = 1.0f;
+    else if (option == 22) segmentLengthMultiplier = 1.5f;
+    else if (option == 23) segmentLengthMultiplier = 2.0f;
+    else if (option == 24) segmentLengthMultiplier = 3.0f;
+    else if (option == 30) thicknessMultiplier = 0.5f;
+    else if (option == 31) thicknessMultiplier = 1.0f;
+    else if (option == 32) thicknessMultiplier = 1.5f;
+    else if (option == 33) thicknessMultiplier = 2.0f;
+    else if (option == 34) thicknessMultiplier = 3.0f;
+    else if (option == 40) showLeaves = !showLeaves;
+    else if (option == 41) leafSize = 0.5f;
+    else if (option == 42) leafSize = 0.8f;
+    else if (option == 43) leafSize = 1.2f;
+    else if (option == 44) leafSize = 1.8f;
+    else if (option == 45) leafDensity = 0.3f;
+    else if (option == 46) leafDensity = 0.5f;
+    else if (option == 47) leafDensity = 0.7f;
+    else if (option == 48) leafDensity = 0.9f;
+    else if (option == 49) showStems = !showStems;
+    else if (option == 50) {
+        std::cout << "Regenerišem lišće..." << std::endl;
+        generateLeavesForLSystem();
+    }
+
+    regenerateLSystem();
+    glutPostRedisplay();
+}
+
+void mouseWheel(int button, int dir, int x, int y) {
+    if (dir > 0)
+        cameraDistance -= 1.0f;
+    else
+        cameraDistance += 1.0f;
+
+    if (cameraDistance < 2.0f) cameraDistance = 2.0f;
+    if (cameraDistance > 100.0f) cameraDistance = 100.0f;
+
+    glutPostRedisplay();
+}
+
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH | GLUT_MULTISAMPLE);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Projekat Petnica");
+
+    init();
+
+    glutCreateMenu(menu);
+    glutAddMenuEntry("=== Ugao grananja ===", -1);
+    glutAddMenuEntry("15 stepeni", 1);
+    glutAddMenuEntry("30 stepeni", 2);
+    glutAddMenuEntry("45 stepeni", 3);
+    glutAddMenuEntry("60 stepeni", 4);
+
+    glutAddMenuEntry("=== Dubina ===", -1);
+    glutAddMenuEntry("Dubina 2", 10);
+    glutAddMenuEntry("Dubina 3", 11);
+    glutAddMenuEntry("Dubina 4", 12);
+    glutAddMenuEntry("Dubina 5", 13);
+
+    glutAddMenuEntry("=== Duzina segmenata ===", -1);
+    glutAddMenuEntry("Kratko (0.5x)", 20);
+    glutAddMenuEntry("Normalno (1.0x)", 21);
+    glutAddMenuEntry("Dugo (1.5x)", 22);
+    glutAddMenuEntry("Vrlo dugo (2.0x)", 23);
+    glutAddMenuEntry("Ogromno (3.0x)", 24);
+
+    glutAddMenuEntry("=== Debljina ===", -1);
+    glutAddMenuEntry("Tanko (0.5x)", 30);
+    glutAddMenuEntry("Normalno (1.0x)", 31);
+    glutAddMenuEntry("Debelo (1.5x)", 32);
+    glutAddMenuEntry("Vrlo debelo (2.0x)", 33);
+    glutAddMenuEntry("Ogromno (3.0x)", 34);
+
+    glutAddMenuEntry("=== Lisce - STABILNO ===", -1);
+    glutAddMenuEntry("Prikazi/Sakrij lisce", 40);
+    glutAddMenuEntry("Malo lisce (0.5x)", 41);
+    glutAddMenuEntry("Normalno lisce (0.8x)", 42);
+    glutAddMenuEntry("Veliko lisce (1.2x)", 43);
+    glutAddMenuEntry("Ogromno lisce (1.8x)", 44);
+    glutAddMenuEntry("Retko lisce (30%)", 45);
+    glutAddMenuEntry("Umereno lisce (50%)", 46);
+    glutAddMenuEntry("Gusto lisce (70%)", 47);
+    glutAddMenuEntry("Vrlo gusto lisce (90%)", 48);
+    glutAddMenuEntry("Prikazi/Sakrij peteljke", 49);
+    glutAddMenuEntry("--- REGENERACIJA ---", -1);
+    glutAddMenuEntry("Regenerisi lisce", 50);
+
+    glutAttachMenu(GLUT_RIGHT_BUTTON);
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutMouseFunc(mouse);
+    glutMotionFunc(motion);
+    glutMouseWheelFunc(mouseWheel);
+
+    glutMainLoop();
+    return 0;
+}
