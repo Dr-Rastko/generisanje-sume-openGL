@@ -1,0 +1,483 @@
+
+#include <GL/freeglut.h>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <map>
+#include <ctime>
+#include <cstdlib>
+#include <GL/glu.h>
+
+// --- Globalne varijable za kameru i interakciju ---
+float cameraAngleX = 30.0f;
+float cameraAngleY = 45.0f;
+float cameraDistance = 20.0f;
+
+int lastMouseX, lastMouseY;
+bool leftMousePressed = false;
+
+// --- L-System parametri ---
+std::string axiom = "F"; // Početni aksiom
+std::map<char, std::string> rules; // Pravila transformacije
+std::string lsystemString; // Generisani L-System string
+int lsystemDepth = 3; // Dubina generisanja L-Systema
+float branchAngle = 30.0f; // Ugao grananja
+
+// Dodati parametri za kontrolu veličine i debljine stabla
+float segmentLengthMultiplier = 1.0f; // Osnovna dužina segmenta
+float thicknessMultiplier = 1.0f;     // Osnovna debljina
+
+// Struktura za 3D vektor
+struct Vec3 {
+    float x, y, z;
+};
+
+// Struktura za grupiranje listova
+struct LeafCluster {
+    Vec3 center;
+    float radius;
+    int leafCount;
+};
+
+// Pozicije stabala u sceni
+std::vector<Vec3> treePositions;
+
+// Klaster listova za optimizaciju
+std::vector<std::vector<LeafCluster> > treeLeafClusters;
+
+// --- Optimizacija: Cache za geometriju cilindra ---
+struct CylinderCache {
+    std::vector<float> vertices;
+    std::vector<float> normals;
+    bool isGenerated;
+
+    CylinderCache() : isGenerated(false) {}
+} cylinderCache;
+
+// --- Funkcija za generisanje L-System stringa ---
+std::string generateLSystem(const std::string& axiom, int depth) {
+    std::string current = axiom;
+    for (int i = 0; i < depth; ++i) {
+        std::string next;
+        next.reserve(current.length() * 7);
+        for (size_t j = 0; j < current.length(); ++j) {
+            char c = current[j];
+            if (rules.find(c) != rules.end())
+                next += rules[c];
+            else
+                next += c;
+        }
+        current = next;
+    }
+    return current;
+}
+
+// --- Funkcija za pronalaženje krajeva grana u L-System stringu ---
+void findBranchEnds(const std::string& lsys, std::vector<bool>& isBranchEnd) {
+    isBranchEnd.resize(lsys.length(), false);
+    std::vector<int> bracketStack;
+
+    for (size_t i = 0; i < lsys.length(); ++i) {
+        char c = lsys[i];
+        if (c == '[') {
+            bracketStack.push_back(i);
+        } else if (c == ']') {
+            if (!bracketStack.empty()) {
+                // Označava poslednji 'F' pre ']' kao kraj grane
+                for (int j = i - 1; j >= 0; j--) {
+                    if (lsys[j] == 'F') {
+                        isBranchEnd[j] = true;
+                        break;
+                    }
+                    if (lsys[j] == '[' || lsys[j] == ']') break;
+                }
+                bracketStack.pop_back();
+            }
+        }
+    }
+
+    // Poslednji 'F' u stringu je takođe kraj
+    for (int i = lsys.length() - 1; i >= 0; i--) {
+        if (lsys[i] == 'F') {
+            isBranchEnd[i] = true;
+            break;
+        }
+    }
+}
+
+// --- Funkcija za regeneraciju L-Systema kada se promene parametri ---
+void regenerateLSystem() {
+    lsystemString = generateLSystem(axiom, lsystemDepth);
+}
+
+// --- Optimizovana funkcija za crtanje cilindra (grane) ---
+void drawCylinderOptimized(float bottomRadius, float topRadius, float height) {
+    const int segments = 6;
+    const float angleStep = 2.0f * 3.14159f / segments;
+
+    glBegin(GL_TRIANGLE_STRIP);
+    for (int i = 0; i <= segments; i++) {
+        float angle = i * angleStep;
+        float x1 = bottomRadius * cos(angle);
+        float z1 = bottomRadius * sin(angle);
+        float x2 = topRadius * cos(angle);
+        float z2 = topRadius * sin(angle);
+
+        float nx = cos(angle);
+        float nz = sin(angle);
+
+        glNormal3f(nx, 0.0f, nz);
+        glVertex3f(x1, 0.0f, z1);
+        glVertex3f(x2, height, z2);
+    }
+    glEnd();
+}
+
+// --- Funkcija za crtanje lista kao sfere ---
+void drawLeafSphere(float radius) {
+    glColor3f(0.2f, 0.6f, 0.1f);
+    glutSolidSphere(radius, 6, 6);
+    glColor3f(0.55f, 0.35f, 0.2f); // Vrati boju na braon
+}
+
+// --- Funkcija za crtanje klastera listova ---
+void drawLeafCluster(const LeafCluster& cluster) {
+    glColor3f(0.2f, 0.6f, 0.1f);
+    glPushMatrix();
+    glTranslatef(cluster.center.x, cluster.center.y, cluster.center.z);
+
+    // Crta jedan veći list koji predstavlja klaster
+    float clusterRadius = cluster.radius * (1.0f + cluster.leafCount * 0.1f);
+    glutSolidSphere(clusterRadius, 8, 8);
+
+    glPopMatrix();
+    glColor3f(0.55f, 0.35f, 0.2f);
+}
+
+// --- Funkcija za kreiranje klastera listova ---
+std::vector<LeafCluster> createLeafClusters(const std::vector<Vec3>& leafPositions, float clusterDistance = 2.0f) {
+    std::vector<LeafCluster> clusters;
+    std::vector<bool> processed(leafPositions.size(), false);
+
+    for (size_t i = 0; i < leafPositions.size(); ++i) {
+        if (processed[i]) continue;
+
+        LeafCluster cluster;
+        cluster.center = leafPositions[i];
+        cluster.leafCount = 1;
+        cluster.radius = 0.3f;
+        processed[i] = true;
+
+        // Pronađi obližnje listove
+        for (size_t j = i + 1; j < leafPositions.size(); ++j) {
+            if (processed[j]) continue;
+
+            float dx = leafPositions[j].x - cluster.center.x;
+            float dy = leafPositions[j].y - cluster.center.y;
+            float dz = leafPositions[j].z - cluster.center.z;
+            float distance = sqrt(dx*dx + dy*dy + dz*dz);
+
+            if (distance < clusterDistance) {
+                // Dodaj u klaster
+                cluster.center.x = (cluster.center.x * cluster.leafCount + leafPositions[j].x) / (cluster.leafCount + 1);
+                cluster.center.y = (cluster.center.y * cluster.leafCount + leafPositions[j].y) / (cluster.leafCount + 1);
+                cluster.center.z = (cluster.center.z * cluster.leafCount + leafPositions[j].z) / (cluster.leafCount + 1);
+                cluster.leafCount++;
+                processed[j] = true;
+            }
+        }
+
+        clusters.push_back(cluster);
+    }
+
+    return clusters;
+}
+
+// --- Glavna funkcija za crtanje stabla sa optimizovanim listovima ---
+void drawTree(const std::string& lsys) {
+    glPushMatrix();
+    float segmentLength = 1.2f * segmentLengthMultiplier;
+    float thickness = 0.25f * thicknessMultiplier;
+    int depth = 0;
+
+    // Pronađi krajeve grana
+    std::vector<bool> isBranchEnd;
+    findBranchEnds(lsys, isBranchEnd);
+
+    // Pozicije listova za trenutno stablo
+    std::vector<Vec3> currentTreeLeaves;
+
+    const float thicknessReduction = 0.65f;
+    const float lengthReduction = 0.8f;
+    const float branchThicknessReduction = 0.8f;
+    const float branchLengthReduction = 0.9f;
+
+    size_t segmentIndex = 0;
+
+    for (size_t i = 0; i < lsys.length(); ++i) {
+        char c = lsys[i];
+        switch (c) {
+            case 'F': {
+                bool shouldDrawLeaf = false;
+
+                // Proveri da li je ovo kraj grane ili je grana previše mala
+                if (segmentIndex < isBranchEnd.size() && isBranchEnd[segmentIndex]) {
+                    shouldDrawLeaf = true;
+                } else if (thickness < 0.02f || segmentLength < 0.1f || depth > 3) {
+                    shouldDrawLeaf = true;
+                }
+
+                if (thickness > 0.005f && segmentLength > 0.01f && depth <= 3) {
+                    drawCylinderOptimized(thickness, thickness * 0.7f, segmentLength);
+                    glTranslatef(0.0f, segmentLength, 0.0f);
+                }
+
+                // Dodaj list na kraju grane ili ako je grana previše mala
+                if (shouldDrawLeaf) {
+                    // Dobij trenutnu poziciju u svetskim koordinatama
+                    float modelview[16];
+                    glGetFloatv(GL_MODELVIEW_MATRIX, modelview);
+
+                    Vec3 leafPos;
+                    leafPos.x = modelview[12];
+                    leafPos.y = modelview[13];
+                    leafPos.z = modelview[14];
+
+                    currentTreeLeaves.push_back(leafPos);
+                }
+
+                thickness *= thicknessReduction;
+                segmentLength *= lengthReduction;
+                segmentIndex++;
+                break;
+            }
+            case '+': glRotatef(branchAngle, 0.0f, 0.0f, 1.0f); break;
+            case '-': glRotatef(-branchAngle, 0.0f, 0.0f, 1.0f); break;
+            case '&': glRotatef(branchAngle, 1.0f, 0.0f, 0.0f); break;
+            case '^': glRotatef(-branchAngle, 1.0f, 0.0f, 0.0f); break;
+            case '\\': glRotatef(branchAngle, 0.0f, 1.0f, 0.0f); break;
+            case '/': glRotatef(-branchAngle, 0.0f, 1.0f, 0.0f); break;
+            case '|': glRotatef(180.0f, 0.0f, 0.0f, 1.0f); break;
+            case '[':
+                glPushMatrix();
+                depth++;
+                thickness *= branchThicknessReduction;
+                segmentLength *= branchLengthReduction;
+                break;
+            case ']':
+                glPopMatrix();
+                depth--;
+                thickness = 0.25f * thicknessMultiplier;
+                segmentLength = 1.2f * segmentLengthMultiplier;
+                float depthFactorThickness = 1.0f;
+                float depthFactorLength = 1.0f;
+                for(int d = 0; d < depth; d++) {
+                    depthFactorThickness *= branchThicknessReduction * thicknessReduction;
+                    depthFactorLength *= branchLengthReduction * lengthReduction;
+                }
+                thickness *= depthFactorThickness;
+                segmentLength *= depthFactorLength;
+                break;
+        }
+    }
+
+    glPopMatrix();
+
+    // Kreiraj klastere listova za bolje performanse
+    std::vector<LeafCluster> clusters = createLeafClusters(currentTreeLeaves, 1.5f);
+
+    // Crta klastere umesto pojedinačnih listova
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        drawLeafCluster(clusters[i]);
+    }
+}
+
+// --- Inicijalizacija OpenGL parametara i podataka ---
+void init() {
+    glClearColor(0.5f, 0.8f, 1.0f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
+
+    GLfloat lightPos[] = {5.0f, 10.0f, 5.0f, 1.0f};
+    GLfloat lightDiffuse[] = {1.0f, 1.0f, 1.0f, 1.0f};
+    GLfloat lightAmbient[] = {0.4f, 0.4f, 0.4f, 1.0f};
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
+
+    // Modifikovano pravilo - uklonjen 'L' iz pravila jer se listovi dodaju automatski na krajevima
+    rules['F'] = "F[+F][-F][&F][^F]";
+
+    regenerateLSystem();
+
+    srand((unsigned int)time(0));
+    treeLeafClusters.clear();
+
+    for (int i = 0; i < 15; ++i) {
+        float x = (rand() % 200 - 100) / 10.0f;
+        float z = (rand() % 200 - 100) / 10.0f;
+        Vec3 pos = {x, 0.0f, z};
+        treePositions.push_back(pos);
+    }
+}
+
+// --- Funkcija za iscrtavanje scene ---
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    float camX = cameraDistance * sinf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+    float camY = cameraDistance * sinf(cameraAngleX * 3.14f / 180.0f);
+    float camZ = cameraDistance * cosf(cameraAngleY * 3.14f / 180.0f) * cosf(cameraAngleX * 3.14f / 180.0f);
+
+    gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+    // Crtanje terena
+    glColor3f(0.3f, 0.8f, 0.3f);
+    glBegin(GL_QUADS);
+        glNormal3f(0.0f, 1.0f, 0.0f);
+        glVertex3f(-15.0f, 0.0f, -15.0f);
+        glVertex3f( 15.0f, 0.0f, -15.0f);
+        glVertex3f( 15.0f, 0.0f,  15.0f);
+        glVertex3f(-15.0f, 0.0f,  15.0f);
+    glEnd();
+
+    // Crtanje stabala
+    glColor3f(0.55f, 0.35f, 0.2f);
+    for (size_t i = 0; i < treePositions.size(); ++i) {
+        glPushMatrix();
+        glTranslatef(treePositions[i].x, treePositions[i].y, treePositions[i].z);
+        drawTree(lsystemString);
+        glPopMatrix();
+    }
+
+    glutSwapBuffers();
+}
+
+// --- Funkcija za promenu veličine prozora ---
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    float ratio = (float)w / (float)h;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(45, ratio, 1, 1000);
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+// --- Funkcija za obradu pokreta miša ---
+void motion(int x, int y) {
+    if (leftMousePressed) {
+        cameraAngleY += (x - lastMouseX);
+        cameraAngleX += (y - lastMouseY);
+        if (cameraAngleX > 89.0f) cameraAngleX = 89.0f;
+        if (cameraAngleX < -89.0f) cameraAngleX = -89.0f;
+    }
+
+    lastMouseX = x;
+    lastMouseY = y;
+
+    glutPostRedisplay();
+}
+
+// --- Funkcija za obradu klika miša ---
+void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        leftMousePressed = (state == GLUT_DOWN);
+        lastMouseX = x;
+        lastMouseY = y;
+    }
+}
+
+// --- Funkcija za obradu izbora iz menija ---
+void menu(int option) {
+    if (option == 1) branchAngle = 15.0f;
+    else if (option == 2) branchAngle = 30.0f;
+    else if (option == 3) branchAngle = 45.0f;
+    else if (option == 4) branchAngle = 60.0f;
+
+    else if (option == 10) lsystemDepth = 2;
+    else if (option == 11) lsystemDepth = 3;
+    else if (option == 12) lsystemDepth = 4;
+    else if (option == 13) lsystemDepth = 5;
+
+    else if (option == 20) segmentLengthMultiplier = 0.5f;
+    else if (option == 21) segmentLengthMultiplier = 1.0f;
+    else if (option == 22) segmentLengthMultiplier = 1.5f;
+    else if (option == 23) segmentLengthMultiplier = 2.0f;
+    else if (option == 24) segmentLengthMultiplier = 3.0f;
+
+    else if (option == 30) thicknessMultiplier = 0.5f;
+    else if (option == 31) thicknessMultiplier = 1.0f;
+    else if (option == 32) thicknessMultiplier = 1.5f;
+    else if (option == 33) thicknessMultiplier = 2.0f;
+    else if (option == 34) thicknessMultiplier = 3.0f;
+
+    regenerateLSystem();
+    glutPostRedisplay();
+}
+
+// --- Funkcija za obradu skrola miša (zumiranje) ---
+void mouseWheel(int button, int dir, int x, int y) {
+    if (dir > 0)
+        cameraDistance -= 1.0f;
+    else
+        cameraDistance += 1.0f;
+
+    if (cameraDistance < 2.0f) cameraDistance = 2.0f;
+    if (cameraDistance > 100.0f) cameraDistance = 100.0f;
+
+    glutPostRedisplay();
+}
+
+// --- Glavna funkcija programa ---
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Projekat Petnica");
+
+    init();
+
+    glutCreateMenu(menu);
+    glutAddMenuEntry("=== Ugao grananja ===", -1);
+    glutAddMenuEntry("15 stepeni", 1);
+    glutAddMenuEntry("30 stepeni", 2);
+    glutAddMenuEntry("45 stepeni", 3);
+    glutAddMenuEntry("60 stepeni", 4);
+
+    glutAddMenuEntry("=== Dubina ===", -1);
+    glutAddMenuEntry("Dubina 2", 10);
+    glutAddMenuEntry("Dubina 3", 11);
+    glutAddMenuEntry("Dubina 4", 12);
+    glutAddMenuEntry("Dubina 5", 13);
+
+    glutAddMenuEntry("=== Duzina segmenata ===", -1);
+    glutAddMenuEntry("Kratko (0.5x)", 20);
+    glutAddMenuEntry("Normalno (1.0x)", 21);
+    glutAddMenuEntry("Dugo (1.5x)", 22);
+    glutAddMenuEntry("Vrlo dugo (2.0x)", 23);
+    glutAddMenuEntry("Ogromno (3.0x)", 24);
+
+    glutAddMenuEntry("=== Debljina ===", -1);
+    glutAddMenuEntry("Tanko (0.5x)", 30);
+    glutAddMenuEntry("Normalno (1.0x)", 31);
+    glutAddMenuEntry("Debelo (1.5x)", 32);
+    glutAddMenuEntry("Vrlo debelo (2.0x)", 33);
+    glutAddMenuEntry("Ogromno (3.0x)", 34);
+
+    glutAttachMenu(GLUT_RIGHT_BUTTON);
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutMouseFunc(mouse);
+    glutMotionFunc(motion);
+    glutMouseWheelFunc(mouseWheel);
+
+    glutMainLoop();
+    return 0;
+}
